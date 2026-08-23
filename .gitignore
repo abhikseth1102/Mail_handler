@@ -39,3 +39,14 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Python
+backend/venv/
+__pycache__/
+*.pyc
+
+# Local database
+data/mail.db
+
+# Uploaded attachments
+data/attachments/
