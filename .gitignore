@@ -50,3 +50,6 @@ data/mail.db
 
 # Uploaded attachments
 data/attachments/
+# Real backend paths
+backend/db/mail.db
+backend/attachments/*
