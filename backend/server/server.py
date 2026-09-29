@@ -12,7 +12,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from protocol import receive_message, send_message
 from db.queries import create_user, authenticate_user, save_email, get_inbox, get_email, delete_email
+from db.models import init_db
 from mime.decoder import parse_mime_email
+
+# Initialize DB tables on startup
+init_db()
 
 HOST = os.environ.get('TCP_HOST', '0.0.0.0')
 PORT = int(os.environ.get('TCP_PORT', 5000))
