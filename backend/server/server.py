@@ -14,8 +14,8 @@ from protocol import receive_message, send_message
 from db.queries import create_user, authenticate_user, save_email, get_inbox, get_email, delete_email
 from mime.decoder import parse_mime_email
 
-HOST = "127.0.0.1"
-PORT = 5000
+HOST = os.environ.get('HOST', '0.0.0.0')
+PORT = int(os.environ.get('PORT', 5000))
 
 # --- SECURITY: DDoS Protection & Rate Limiting ---
 RATE_LIMIT_LOCK = threading.Lock()

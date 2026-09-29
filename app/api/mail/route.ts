@@ -86,8 +86,11 @@ export async function POST(req: NextRequest) {
     
     const client = new net.Socket();
     
+    const tcpHost = process.env.TCP_HOST || '127.0.0.1';
+    const tcpPort = parseInt(process.env.TCP_PORT || '5000', 10);
+    
     await new Promise<void>((resolve, reject) => {
-      client.connect(5000, '127.0.0.1', () => resolve());
+      client.connect(tcpPort, tcpHost, () => resolve());
       client.on('error', (err) => reject(err));
     });
 
