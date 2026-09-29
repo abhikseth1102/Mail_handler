@@ -60,7 +60,7 @@ function buildMime(sender: string, recipients: string[], subject: string, bodyTe
     mime += `Content-Type: multipart/mixed; boundary="${boundary}"\r\n\r\n`;
     
     mime += `--${boundary}\r\n`;
-    mime += `Content-Type: text/plain; charset="utf-8"\r\n\r\n`;
+    mime += `Content-Type: text/html; charset="utf-8"\r\n\r\n`;
     mime += `${bodyText}\r\n\r\n`;
     
     if (attachments && attachments.length > 0) {
@@ -82,7 +82,7 @@ function buildMime(sender: string, recipients: string[], subject: string, bodyTe
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { command, payload, username, password } = body;
+    const { command, payload, username, password, jwt } = body;
     
     const client = new net.Socket();
     
@@ -93,12 +93,12 @@ export async function POST(req: NextRequest) {
 
     try {
         if (['SEND_EMAIL', 'GET_INBOX', 'GET_EMAIL', 'DELETE_EMAIL'].includes(command)) {
-          if (!username || !password) {
-            throw new Error("Missing credentials for authenticated command");
+          if (!jwt) {
+            throw new Error("Missing JWT token for authenticated command");
           }
-          const loginRes = await sendTcpCommand(client, 'LOGIN', `${username}:${password}`);
-          if (loginRes.verb !== '200') {
-             throw new Error(loginRes.payload.toString('utf-8'));
+          const authRes = await sendTcpCommand(client, 'AUTH', jwt);
+          if (authRes.verb !== '200') {
+             throw new Error("Invalid or expired JWT session");
           }
         }
 

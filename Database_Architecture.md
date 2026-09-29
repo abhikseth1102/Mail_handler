@@ -79,14 +79,14 @@ When a user sends an email with attachments to multiple recipients, the database
 
 ```mermaid
 flowchart TD
-    Start[User Clicks Send] --> E[INSERT into EMAILS<br/>(subject, body, sender_id)]
-    E --> |Returns new Email ID| R[Loop through Recipients]
-    R --> R1[INSERT into RECIPIENTS<br/>(email_id, user_id, is_read=0)]
-    R1 --> A{Has Attachments?}
-    A -- Yes --> FS[Save Binary File to Hard Drive]
-    FS --> A1[INSERT into ATTACHMENTS<br/>(email_id, filename, file_path)]
-    A1 --> Commit[(COMMIT Transaction)]
-    A -- No --> Commit
+    Start["User Clicks Send"] --> E["INSERT into EMAILS<br/>(subject, body, sender_id)"]
+    E --> |"Returns new Email ID"| R["Loop through Recipients"]
+    R --> R1["INSERT into RECIPIENTS<br/>(email_id, user_id, is_read=0)"]
+    R1 --> A{"Has Attachments?"}
+    A -- "Yes" --> FS["Save Binary File to Hard Drive"]
+    FS --> A1["INSERT into ATTACHMENTS<br/>(email_id, filename, file_path)"]
+    A1 --> Commit[("COMMIT Transaction")]
+    A -- "No" --> Commit
     
-    Commit --> Done[Success Response to Frontend]
+    Commit --> Done["Success Response to Frontend"]
 ```

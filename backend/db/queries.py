@@ -22,7 +22,7 @@ def verify_password(stored_password: str, provided_password: str) -> bool:
     pwdhash = binascii.hexlify(pwdhash).decode('ascii')
     return pwdhash == stored_hash
 
-def create_user(username, password):
+def create_user(username, password, public_key=None):
     """
     Hashes the password and creates a new user.
     Returns the user_id if successful. Raises Exception on duplicate username.
@@ -32,8 +32,8 @@ def create_user(username, password):
     try:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO users (username, password_hash) VALUES (?, ?)",
-            (username, password_hash)
+            "INSERT INTO users (username, password_hash, public_key) VALUES (?, ?, ?)",
+            (username, password_hash, public_key)
         )
         conn.commit()
         return cursor.lastrowid
@@ -57,6 +57,18 @@ def authenticate_user(username, password):
             if verify_password(row['password_hash'], password):
                 return dict(row)
         return None
+    finally:
+        conn.close()
+
+def get_public_keys(usernames):
+    """Returns a dict mapping username to public_key for requested users."""
+    if not usernames: return {}
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        placeholders = ','.join('?' * len(usernames))
+        cursor.execute(f"SELECT username, public_key FROM users WHERE username IN ({placeholders})", tuple(usernames))
+        return {row['username']: row['public_key'] for row in cursor.fetchall()}
     finally:
         conn.close()
 
@@ -108,19 +120,30 @@ def save_email(sender_id, subject, body_text, recipients_list, attachments_list=
     finally:
         conn.close()
 
-def get_inbox(user_id):
-    """Returns lightweight inbox summaries for user."""
+def get_inbox(user_id, search="", limit=20, offset=0):
+    """Returns lightweight inbox summaries for user with search and pagination."""
     conn = get_connection()
     try:
         cursor = conn.cursor()
-        cursor.execute("""
+        
+        query = """
             SELECT e.id, u.username as sender, e.subject, e.timestamp, r.is_read 
             FROM emails e
             JOIN recipients r ON e.id = r.email_id
             JOIN users u ON e.sender_id = u.id
             WHERE r.user_id = ? AND r.is_deleted = 0
-            ORDER BY e.timestamp DESC
-        """, (user_id,))
+        """
+        params = [user_id]
+        
+        if search:
+            query += " AND (e.subject LIKE ? OR u.username LIKE ?)"
+            search_term = f"%{search}%"
+            params.extend([search_term, search_term])
+            
+        query += " ORDER BY e.timestamp DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        
+        cursor.execute(query, tuple(params))
         return [dict(row) for row in cursor.fetchall()]
     finally:
         conn.close()

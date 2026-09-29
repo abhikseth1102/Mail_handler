@@ -5,6 +5,7 @@ import os
 import sqlite3
 import json
 import base64
+import time
 
 # Allow importing from the db and mime modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -15,6 +16,29 @@ from mime.decoder import parse_mime_email
 
 HOST = "127.0.0.1"
 PORT = 5000
+
+# --- SECURITY: DDoS Protection & Rate Limiting ---
+RATE_LIMIT_LOCK = threading.Lock()
+IP_CONNECTIONS = {}
+MAX_CONNECTIONS_PER_MINUTE = 1000  # Allows Next.js API, blocks infinite loops
+
+def is_rate_limited(ip_address):
+    with RATE_LIMIT_LOCK:
+        current_time = time.time()
+        if ip_address not in IP_CONNECTIONS:
+            IP_CONNECTIONS[ip_address] = []
+        
+        # Keep timestamps from the last 60 seconds
+        IP_CONNECTIONS[ip_address] = [t for t in IP_CONNECTIONS[ip_address] if current_time - t < 60]
+        
+        if len(IP_CONNECTIONS[ip_address]) >= MAX_CONNECTIONS_PER_MINUTE:
+            return True
+        
+        IP_CONNECTIONS[ip_address].append(current_time)
+        return False
+# -------------------------------------------------
+
+from jwt_util import create_jwt, verify_jwt
 
 def handle_client(conn, addr):
     print(f"[NEW CONNECTION] {addr} connected.")
@@ -29,11 +53,12 @@ def handle_client(conn, addr):
                     payload_str = payload.decode('utf-8')
                     username, password = payload_str.split(':', 1)
                     user_id = create_user(username, password)
-                    send_message(conn, "200", f"User registered with ID: {user_id}".encode('utf-8'))
+                    token = create_jwt(user_id)
+                    send_message(conn, "200", token.encode('utf-8'))
                 except sqlite3.IntegrityError:
                     send_message(conn, "400", b"Username already exists")
                 except ValueError:
-                    send_message(conn, "400", b"Invalid payload format, expected username:password")
+                    send_message(conn, "400", b"Invalid payload format")
             
             elif verb == "LOGIN":
                 try:
@@ -42,11 +67,21 @@ def handle_client(conn, addr):
                     user = authenticate_user(username, password)
                     if user:
                         current_user_id = user['id']
-                        send_message(conn, "200", f"Login successful, User ID: {user['id']}".encode('utf-8'))
+                        token = create_jwt(current_user_id)
+                        send_message(conn, "200", token.encode('utf-8'))
                     else:
                         send_message(conn, "401", b"Invalid username or password")
                 except ValueError:
-                    send_message(conn, "400", b"Invalid payload format, expected username:password")
+                    send_message(conn, "400", b"Invalid payload format")
+
+            elif verb == "AUTH":
+                token = payload.decode('utf-8').strip()
+                user_id = verify_jwt(token)
+                if user_id:
+                    current_user_id = user_id
+                    send_message(conn, "200", b"Authenticated")
+                else:
+                    send_message(conn, "401", b"Invalid or expired JWT")
 
             elif verb == "LOGOUT":
                 current_user_id = None
@@ -76,7 +111,16 @@ def handle_client(conn, addr):
                     send_message(conn, "401", b"Unauthorized")
                     continue
                 try:
-                    inbox = get_inbox(current_user_id)
+                    search = ""
+                    limit = 20
+                    offset = 0
+                    if payload:
+                        req_data = json.loads(payload.decode('utf-8'))
+                        search = req_data.get("search", "")
+                        page = max(1, req_data.get("page", 1))
+                        offset = (page - 1) * limit
+                        
+                    inbox = get_inbox(current_user_id, search, limit, offset)
                     send_message(conn, "200", json.dumps(inbox).encode('utf-8'))
                 except Exception as e:
                     send_message(conn, "500", f"Server error: {e}".encode('utf-8'))
@@ -135,6 +179,14 @@ def start_server():
     while True:
         try:
             conn, addr = s.accept()
+            ip = addr[0]
+            
+            if is_rate_limited(ip):
+                print(f"[SECURITY] Blocking {ip} due to rate limiting (DDoS Protection).")
+                send_message(conn, "429", b"Too Many Requests")
+                conn.close()
+                continue
+                
             thread = threading.Thread(target=handle_client, args=(conn, addr))
             thread.start()
             print(f"[ACTIVE CONNECTIONS] {threading.active_count() - 1}")

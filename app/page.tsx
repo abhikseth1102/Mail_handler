@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import { encryptText, decryptText } from './utils/crypto';
 
 // --- SVG Icons ---
 const InboxIcon = () => (<svg className="w-5 h-5 mr-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" /></svg>);
@@ -14,6 +15,7 @@ const SendIcon = () => (<svg className="w-4 h-4 ml-2" fill="none" viewBox="0 0 2
 export default function Home() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [jwt, setJwt] = useState('');
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   
   const [view, setView] = useState<'inbox' | 'compose' | 'email'>('inbox');
@@ -24,10 +26,63 @@ export default function Home() {
   const [recipients, setRecipients] = useState('');
   const [subject, setSubject] = useState('');
   const [bodyText, setBodyText] = useState('');
+  const [e2eePassword, setE2eePassword] = useState('');
+  const [decryptPassword, setDecryptPassword] = useState('');
+  const [decryptedBody, setDecryptedBody] = useState('');
   const [attachments, setAttachments] = useState<any[]>([]);
+
+  const handleDecrypt = async (cipherText: string) => {
+    try {
+      const plain = await decryptText(cipherText, decryptPassword);
+      setDecryptedBody(plain);
+      setMessage('Decrypted successfully!');
+    } catch (e) {
+      setMessage('Incorrect passphrase or corrupted data');
+    }
+  };
+  const editorRef = useRef<HTMLDivElement>(null);
+  
+  useEffect(() => {
+    if (editorRef.current && view === 'compose') {
+      // Only set innerHTML if it's currently empty, or if bodyText has a reply block.
+      // We format newline characters into HTML breaks for reply/forward text
+      const htmlBody = bodyText.replace(/\n/g, '<br/>');
+      if (editorRef.current.innerHTML !== htmlBody) {
+        editorRef.current.innerHTML = htmlBody;
+      }
+    }
+  }, [bodyText, view]);
   
   const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
+
+  const [searchQuery, setSearchQuery] = useState('');
+  const [page, setPage] = useState(1);
+
+  // Background interval polling for real-time notifications
+  useEffect(() => {
+    if (!isLoggedIn || !jwt) return;
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch('/api/mail', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: 'GET_INBOX', payload: JSON.stringify({ search: searchQuery, page }), jwt })
+        });
+        const data = await res.json();
+        if (res.ok && data.verb === '200') {
+           setInbox(prev => {
+             if (data.payload.length > prev.length) {
+                setMessage('🔔 New email received!');
+                setTimeout(() => setMessage(''), 4000);
+             }
+             return data.payload;
+           });
+        }
+      } catch (e) {}
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [isLoggedIn, jwt, searchQuery, page]);
 
   const getInitials = (name: string) => name ? name.substring(0, 2).toUpperCase() : '??';
   
@@ -37,13 +92,13 @@ export default function Home() {
     return utcDate.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   };
 
-  const sendCommand = async (command: string, payload: any = '') => {
+  const sendCommand = async (command: string, payload: any = '', tokenOverride?: string) => {
     setLoading(true);
     try {
       const res = await fetch('/api/mail', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command, payload, username, password })
+        body: JSON.stringify({ command, payload, username, password, jwt: tokenOverride || jwt })
       });
       const data = await res.json();
       setLoading(false);
@@ -63,22 +118,27 @@ export default function Home() {
     }
   };
 
+  const fetchInbox = async (resetPage = false, customSearch?: string, tokenOverride?: string) => {
+    const p = resetPage ? 1 : page;
+    const s = customSearch !== undefined ? customSearch : searchQuery;
+    const payload = JSON.stringify({ search: s, page: p });
+    const data = await sendCommand('GET_INBOX', payload, tokenOverride);
+    if (data) {
+      setInbox(data);
+      setView('inbox');
+      if (resetPage) setPage(1);
+    }
+  };
+
   const handleLogin = async (isRegister: boolean) => {
     if(!username || !password) return setMessage('Please enter username and password');
     const cmd = isRegister ? 'REGISTER' : 'LOGIN';
     const payload = `${username}:${password}`;
-    const res = await sendCommand(cmd, payload);
-    if (res) {
+    const token = await sendCommand(cmd, payload);
+    if (token) {
+      setJwt(token);
       setIsLoggedIn(true);
-      fetchInbox();
-    }
-  };
-
-  const fetchInbox = async () => {
-    const data = await sendCommand('GET_INBOX');
-    if (data) {
-      setInbox(data);
-      setView('inbox');
+      fetchInbox(true, '', token);
     }
   };
 
@@ -86,6 +146,8 @@ export default function Home() {
     const data = await sendCommand('GET_EMAIL', id.toString());
     if (data) {
       setCurrentEmail(data);
+      setDecryptPassword('');
+      setDecryptedBody('');
       setView('email');
       // Update inbox list to mark as read
       setInbox(inbox.map(em => em.id === id ? { ...em, is_read: 1 } : em));
@@ -120,17 +182,53 @@ export default function Home() {
 
   const sendEmail = async () => {
     if (!recipients) return setMessage("Please enter a recipient");
+    
+    let finalBodyText = bodyText;
+    if (e2eePassword) {
+      try {
+        const encrypted = await encryptText(bodyText, e2eePassword);
+        finalBodyText = `[E2EE-ENCRYPTED]\n${encrypted}`;
+      } catch (e) {
+        return setMessage("Encryption failed");
+      }
+    }
+
     const payload = {
       recipients: recipients.split(',').map(r => r.trim()),
       subject,
-      bodyText,
+      bodyText: finalBodyText,
       attachments
     };
     const res = await sendCommand('SEND_EMAIL', payload);
     if (res) {
-      setRecipients(''); setSubject(''); setBodyText(''); setAttachments([]);
-      fetchInbox();
+      setRecipients(''); setSubject(''); setBodyText(''); setAttachments([]); setE2eePassword('');
+      if (editorRef.current) editorRef.current.innerHTML = '';
+      fetchInbox(true);
     }
+  };
+
+  const handleReply = () => {
+    if (!currentEmail) return;
+    setRecipients(currentEmail.sender);
+    setSubject(currentEmail.subject.startsWith('Re:') ? currentEmail.subject : `Re: ${currentEmail.subject}`);
+    setBodyText(`\n\n--- Original Message from ${currentEmail.sender} ---\n${currentEmail.body_text}`);
+    setView('compose');
+  };
+
+  const handleForward = () => {
+    if (!currentEmail) return;
+    setRecipients('');
+    setSubject(currentEmail.subject.startsWith('Fwd:') ? currentEmail.subject : `Fwd: ${currentEmail.subject}`);
+    setBodyText(`\n\n--- Forwarded Message from ${currentEmail.sender} ---\n${currentEmail.body_text}`);
+    // Forward attachments too
+    if (currentEmail.attachments) {
+      setAttachments(currentEmail.attachments.map((a: any) => ({
+        filename: a.filename,
+        mimeType: a.mime_type,
+        contentBase64: a.content_base64
+      })));
+    }
+    setView('compose');
   };
 
   if (!isLoggedIn) {
@@ -269,12 +367,29 @@ export default function Home() {
 
           {view === 'inbox' && (
             <div className="max-w-5xl mx-auto">
+              
+              <div className="mb-6 flex gap-3">
+                <input 
+                  type="text" 
+                  placeholder="Search emails by sender or subject..." 
+                  className="flex-1 bg-white border border-slate-200 p-3.5 rounded-2xl focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition text-slate-800 shadow-sm"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && fetchInbox(true)}
+                />
+                <button 
+                  className="bg-slate-800 hover:bg-slate-700 text-white font-medium px-8 rounded-2xl transition shadow-sm" 
+                  onClick={() => fetchInbox(true)}
+                >
+                  Search
+                </button>
+              </div>
+
               <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
                 {inbox.length === 0 ? (
                   <div className="p-16 flex flex-col items-center justify-center text-slate-400">
                     <InboxIcon />
-                    <p className="mt-4 text-lg font-medium">Your inbox is empty</p>
-                    <p className="text-sm">When you receive emails, they'll show up here.</p>
+                    <p className="mt-4 text-lg font-medium">{searchQuery ? 'No search results found' : 'Your inbox is empty'}</p>
                   </div>
                 ) : (
                   <div className="divide-y divide-slate-100">
@@ -304,6 +419,25 @@ export default function Home() {
                   </div>
                 )}
               </div>
+
+              <div className="mt-6 flex justify-between items-center text-slate-500 text-sm">
+                <button 
+                  disabled={page === 1}
+                  onClick={() => { setPage(page - 1); fetchInbox(false); }}
+                  className="px-4 py-2 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 disabled:opacity-50 transition"
+                >
+                  Previous Page
+                </button>
+                <span>Page {page}</span>
+                <button 
+                  disabled={inbox.length < 20}
+                  onClick={() => { setPage(page + 1); fetchInbox(false); }}
+                  className="px-4 py-2 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 disabled:opacity-50 transition"
+                >
+                  Next Page
+                </button>
+              </div>
+
             </div>
           )}
 
@@ -321,9 +455,37 @@ export default function Home() {
                   <input className="flex-1 bg-transparent outline-none font-medium text-slate-800 placeholder-slate-300" placeholder="What is this about?" value={subject} onChange={e => setSubject(e.target.value)} />
                 </div>
                 
-                <textarea className="flex-1 w-full p-6 outline-none text-slate-700 resize-none placeholder-slate-300 font-sans leading-relaxed" placeholder="Write your message here..." value={bodyText} onChange={e => setBodyText(e.target.value)}></textarea>
+                <div className="flex items-center gap-2 px-6 py-2 border-b border-slate-100 bg-slate-50">
+                  <button onClick={() => document.execCommand('bold')} className="w-8 h-8 flex items-center justify-center font-bold text-slate-600 hover:bg-slate-200 rounded transition" title="Bold">B</button>
+                  <button onClick={() => document.execCommand('italic')} className="w-8 h-8 flex items-center justify-center italic font-serif text-slate-600 hover:bg-slate-200 rounded transition" title="Italic">I</button>
+                  <button onClick={() => document.execCommand('underline')} className="w-8 h-8 flex items-center justify-center underline text-slate-600 hover:bg-slate-200 rounded transition" title="Underline">U</button>
+                  <div className="w-px h-5 bg-slate-300 mx-1"></div>
+                  <button onClick={() => document.execCommand('insertUnorderedList')} className="px-2 h-8 flex items-center justify-center text-sm font-medium text-slate-600 hover:bg-slate-200 rounded transition" title="Bullet List">• List</button>
+                  <button onClick={() => document.execCommand('insertOrderedList')} className="px-2 h-8 flex items-center justify-center text-sm font-medium text-slate-600 hover:bg-slate-200 rounded transition" title="Numbered List">1. List</button>
+                </div>
                 
-                <div className="bg-slate-50 p-4 border-t border-slate-200 flex items-center justify-between">
+                <div 
+                  ref={editorRef}
+                  contentEditable
+                  className="flex-1 w-full p-6 outline-none text-slate-700 font-sans leading-relaxed overflow-y-auto cursor-text empty:before:content-['Write_your_message_here...'] empty:before:text-slate-300 focus:before:content-['']"
+                  onInput={() => {
+                    if (editorRef.current) setBodyText(editorRef.current.innerHTML);
+                  }}
+                ></div>
+                
+                <div className="bg-slate-50 p-4 border-t border-slate-200 flex flex-col gap-4">
+                  <div className="flex items-center px-4 py-2 border border-slate-200 rounded-lg bg-white focus-within:border-blue-500 transition-colors max-w-sm">
+                    <svg className="w-5 h-5 text-slate-400 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
+                    <input 
+                      type="password" 
+                      placeholder="Optional: Secret Passphrase to Encrypt" 
+                      className="flex-1 bg-transparent outline-none font-medium text-sm text-slate-700 placeholder-slate-400" 
+                      value={e2eePassword} 
+                      onChange={e => setE2eePassword(e.target.value)} 
+                    />
+                  </div>
+                  
+                  <div className="flex items-center justify-between">
                   
                   <div className="flex items-center gap-4">
                     <label className="cursor-pointer inline-flex items-center px-4 py-2 bg-white border border-slate-300 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-50 hover:text-blue-600 transition shadow-sm">
@@ -345,6 +507,7 @@ export default function Home() {
                     <span>Send</span>
                     <SendIcon />
                   </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -360,10 +523,20 @@ export default function Home() {
                     <h1 className="text-2xl font-bold text-slate-900 leading-tight">
                       {currentEmail.subject || '(No Subject)'}
                     </h1>
-                    <button className="ml-4 flex items-center text-sm font-medium text-slate-400 hover:text-red-500 hover:bg-red-50 px-3 py-1.5 rounded-lg transition-colors border border-transparent hover:border-red-100" onClick={() => deleteEmail(currentEmail.id)}>
-                      <TrashIcon />
-                      Delete
-                    </button>
+                    <div className="flex gap-2">
+                      <button className="flex items-center text-sm font-medium text-slate-500 hover:text-blue-600 hover:bg-blue-50 px-3 py-1.5 rounded-lg transition-colors border border-transparent hover:border-blue-100" onClick={handleReply}>
+                        <svg className="w-4 h-4 mr-1.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" /></svg>
+                        Reply
+                      </button>
+                      <button className="flex items-center text-sm font-medium text-slate-500 hover:text-blue-600 hover:bg-blue-50 px-3 py-1.5 rounded-lg transition-colors border border-transparent hover:border-blue-100" onClick={handleForward}>
+                        <svg className="w-4 h-4 mr-1.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 10h-10a8 8 0 00-8 8v2M21 10l-6 6m6-6l-6-6" /></svg>
+                        Forward
+                      </button>
+                      <button className="flex items-center text-sm font-medium text-slate-400 hover:text-red-500 hover:bg-red-50 px-3 py-1.5 rounded-lg transition-colors border border-transparent hover:border-red-100" onClick={() => deleteEmail(currentEmail.id)}>
+                        <TrashIcon />
+                        Delete
+                      </button>
+                    </div>
                   </div>
                   
                   <div className="flex items-center justify-between">
@@ -383,9 +556,29 @@ export default function Home() {
                 </div>
 
                 {/* Email Body */}
-                <div className="p-8 text-slate-800 leading-relaxed font-sans whitespace-pre-wrap min-h-[200px]">
-                  {currentEmail.body_text}
-                </div>
+                {currentEmail.body_text?.startsWith('[E2EE-ENCRYPTED]\n') ? (
+                  <div className="p-12 flex flex-col items-center justify-center text-center bg-slate-50 min-h-[300px]">
+                    <div className="w-16 h-16 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mb-6">
+                      <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" /></svg>
+                    </div>
+                    <h3 className="text-xl font-bold text-slate-800 mb-2">End-to-End Encrypted Message</h3>
+                    <p className="text-slate-500 mb-8 max-w-md">This message was encrypted by the sender before it left their device. Enter the secret passphrase to decrypt it.</p>
+                    
+                    {decryptedBody ? (
+                      <div className="text-left w-full max-w-3xl bg-white p-8 rounded-xl border border-slate-200 shadow-sm leading-relaxed" dangerouslySetInnerHTML={{ __html: decryptedBody }} />
+                    ) : (
+                      <div className="flex gap-2 w-full max-w-sm">
+                        <input type="password" placeholder="Passphrase" className="flex-1 bg-white border border-slate-300 p-3 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none transition text-slate-700" value={decryptPassword} onChange={e => setDecryptPassword(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleDecrypt(currentEmail.body_text.replace('[E2EE-ENCRYPTED]\n', ''))} />
+                        <button className="bg-blue-600 hover:bg-blue-700 text-white font-medium px-6 rounded-lg transition" onClick={() => handleDecrypt(currentEmail.body_text.replace('[E2EE-ENCRYPTED]\n', ''))}>Decrypt</button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div 
+                    className="p-8 text-slate-800 leading-relaxed font-sans whitespace-pre-wrap min-h-[200px]" 
+                    dangerouslySetInnerHTML={{ __html: currentEmail.body_text }} 
+                  />
+                )}
                 
                 {/* Attachments */}
                 {currentEmail.attachments && currentEmail.attachments.length > 0 && (

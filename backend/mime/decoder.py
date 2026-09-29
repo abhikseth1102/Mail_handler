@@ -22,7 +22,7 @@ def parse_mime_email(raw_email_bytes: bytes) -> dict:
             content_type = part.get_content_type()
             content_disposition = str(part.get('Content-Disposition'))
             
-            if content_type == 'text/plain' and 'attachment' not in content_disposition:
+            if content_type in ['text/plain', 'text/html'] and 'attachment' not in content_disposition:
                 result['body_text'] += part.get_payload(decode=True).decode('utf-8', errors='replace')
             elif part.get_filename():
                 result['attachments'].append({
