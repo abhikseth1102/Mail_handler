@@ -1,4 +1,4 @@
-FROM node:18-bullseye-slim
+FROM node:20-bookworm-slim
 
 # Install Python and SQLite
 RUN apt-get update && apt-get install -y python3 sqlite3 && rm -rf /var/lib/apt/lists/*
